@@ -56,7 +56,7 @@ def create_room():
     request_json = json.loads(request_data)
     room_name = request_json.get("room_name")
     max_number = request_json.get("max_number")
-    cancel_time = int(time.time()) + 3600
+    cancel_time = request_json.get("cancel_time")*60 + int(time.time())
     j = json.load(open(ROOMS_LIST_PATH, "r"))
     j[room_name] = {
         "status": True,
