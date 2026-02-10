@@ -15,6 +15,7 @@ room = {
     "max_number": int,  # 最大人数
     "cancel_time": int,  # 使用时间戳
     "current_music":int,
+    "is_music_pause":bool,
     "current_music_time":int
 }
 
@@ -70,12 +71,42 @@ def create_room():
         "max_number": max_number,
         "present_number": 0,
         "cancel_time": cancel_time,
-        "message_list": []
+        "message_list": [],
+        "current_music_time": 0,
+        "is_music_pause": True,
+        "current_music": ""
     }
     f = open(ROOMS_LIST_PATH, "w")
     f.write(json.dumps(j))
     f.close()
     return "行"
+
+@app.route('/api/get_music_status', methods=['POST'])
+def get_music_status():
+    request_data = request.get_json()
+    room_name = request_data.get("room_name")
+    j = json.load(open(ROOMS_LIST_PATH, "r"))
+    r = j.get(room_name, {})
+    return jsonify({
+        "current_music_time": r.get("current_music_time", 0),
+        "is_music_pause": r.get("is_music_pause", True),
+        "current_music": r.get("current_music", "")
+    })
+
+
+@app.route('/api/update_music_status', methods=['POST'])
+def update_music_status():
+    request_data = request.get_json()
+    room_name = request_data.get("room_name")
+    j = json.load(open(ROOMS_LIST_PATH, "r"))
+    if room_name in j:
+        # 更新服务端数据
+        j[room_name]["current_music_time"] = request_data.get("current_music_time")
+        j[room_name]["is_music_pause"] = request_data.get("is_music_pause")
+        j[room_name]["current_music"] = request_data.get("current_music")
+        with open(ROOMS_LIST_PATH, "w") as f:
+            f.write(json.dumps(j))
+    return "OK"
 
 
 @app.route('/api/enter_room', methods=['POST'])
@@ -191,6 +222,10 @@ def list_songs():
 def stream(room_name, filename):
     room_music_dir = f"./data/rooms/{room_name}/music"
     return send_from_directory(room_music_dir, filename)
+
+
+
+
 
 def clean_expired_rooms():
     try:
