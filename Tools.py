@@ -36,7 +36,9 @@ class Tools:
             return True
         except Exception as e:
             raise Exception(f"读取文件失败：{e}") from e
-    def transcode_to_mp3(source_path, target_path):
+
+    @staticmethod  # 添加这个装饰器
+    def transcode_to_mp3(source_path, target_path):  # 这样定义就只收两个参数了
         try:
             audio = AudioSegment.from_file(source_path)
             audio.export(target_path, format="mp3", bitrate="320k")
