@@ -5,7 +5,7 @@ import time
 import os
 from Tools import Tools
 from apscheduler.schedulers.background import BackgroundScheduler
-
+import shutil
 # 模板room
 room = {
     "status": bool,  # 可否加入
@@ -13,6 +13,8 @@ room = {
     "present_number": int,  # 当前人数
     "max_number": int,  # 最大人数
     "cancel_time": int,  # 使用时间戳
+    "current_music":int,
+    "current_music_time":int
 }
 
 app = Flask(__name__)
@@ -20,12 +22,16 @@ CORS(app, resources=r"/*")
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
 
 tools = Tools()
-MUSIC_DIR = './data/music'
 TEMP_DIR = './data/temp'
 ROOMS_LIST_PATH = "./data/rooms_list.json"
 tools.check_and_create_file(ROOMS_LIST_PATH)
-for d in [MUSIC_DIR, TEMP_DIR]:
-    os.makedirs(d, exist_ok=True)
+
+if json.load(open(ROOMS_LIST_PATH, "r"))!={}:
+    for i in json.load(open(ROOMS_LIST_PATH, "r")).keys():
+        os.makedirs(f"./data/rooms/{i}/music", exist_ok=True)
+
+
+os.makedirs(TEMP_DIR, exist_ok=True)
 
 @app.route('/api/connect', methods=['POST'])
 def verify_connect():
@@ -126,6 +132,15 @@ def exit_room():
 
 @app.route('/api/upload', methods=['POST'])
 def upload():
+    # 1. 获取 room_name
+    room_name = request.form.get('room_name')
+    if not room_name:
+        return "Missing room_name", 400
+
+    # 该房间的音乐目录
+    room_music_dir = f"./data/rooms/{room_name}/music"
+    os.makedirs(room_music_dir, exist_ok=True)
+
     if 'file' not in request.files:
         return "No file", 400
 
@@ -138,30 +153,43 @@ def upload():
     ext = os.path.splitext(filename)[1].lower()
 
     if ext == '.mp3':
-        save_path = os.path.join(MUSIC_DIR, filename)
+        save_path = os.path.join(room_music_dir, filename)
         file.save(save_path)
-        return jsonify({"msg": "MP3 上传成功", "status": "done"}), 200
+        return jsonify({"msg": f"房间 {room_name} MP3 上传成功", "status": "done"}), 200
 
     elif ext == '.flac':
         temp_path = os.path.join(TEMP_DIR, filename)
-        target_path = os.path.join(MUSIC_DIR, f"{base_name}.mp3")
+        # 转码后的目标路径也指向房间目录
+        target_path = os.path.join(room_music_dir, f"{base_name}.mp3")
         file.save(temp_path)
 
+        # 启动转码线程
         thread = threading.Thread(target=tools.transcode_to_mp3, args=(temp_path, target_path))
         thread.start()
         return jsonify({"msg": "FLAC 上传成功，后台转码中...", "status": "processing"}), 202
 
     else:
         return "不支持的格式", 400
-@app.route('/api/list_songs', methods=['GET'])
+
+
+@app.route('/api/list_songs', methods=['POST'])
 def list_songs():
-    # 只列出音乐文件夹下的 mp3
-    songs = [f for f in os.listdir(MUSIC_DIR) if f.lower().endswith('.mp3')]
+    request_data = request.get_json()
+    room_name = request_data.get("room_name")
+
+    room_music_dir = f"./data/rooms/{room_name}/music"
+
+    if not os.path.exists(room_music_dir):
+        return jsonify([])
+
+    songs = [f for f in os.listdir(room_music_dir) if f.lower().endswith('.mp3')]
     return jsonify(songs)
 
-@app.route('/api/stream/<filename>')
-def stream(filename):
-    return send_from_directory(MUSIC_DIR, filename)
+
+@app.route('/api/stream/<room_name>/<filename>')
+def stream(room_name, filename):
+    room_music_dir = f"./data/rooms/{room_name}/music"
+    return send_from_directory(room_music_dir, filename)
 
 def clean_expired_rooms():
     try:
@@ -171,15 +199,15 @@ def clean_expired_rooms():
             rooms_data = json.load(f)
 
         current_timestamp = int(time.time())
-        valid_rooms = {}
+        j = json.load(open(ROOMS_LIST_PATH, "r"))
         for room_name, room_info in rooms_data.items():
-            if "cancel_time" in room_info and room_info["cancel_time"] > current_timestamp:
-                valid_rooms[room_name] = room_info
-
-        with open(ROOMS_LIST_PATH, "w", encoding="utf-8") as f:
-            json.dump(valid_rooms, f, ensure_ascii=False)
-
-        print(f"定时清理过期房间完成，当前剩余有效房间：{list(valid_rooms.keys())}")
+            if "cancel_time" in room_info and room_info["cancel_time"] <= current_timestamp:
+                shutil.rmtree(f"./data/rooms/{room_name}")
+                j.pop(room_name)
+        f = open(ROOMS_LIST_PATH, "w")
+        f.write(json.dumps(j))
+        f.close()
+        print(f"定时清理过期房间完成，当前剩余有效房间：{list(j.keys())}")
 
     except Exception as e:
         print(f"定时清理过期房间时出现异常：{str(e)}")
