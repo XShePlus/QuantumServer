@@ -16,7 +16,8 @@ room = {
     "cancel_time": int,  # 使用时间戳
     "current_music":int,
     "is_music_pause":bool,
-    "current_music_time":int
+    "current_music_time":int,
+    "password":str
 }
 
 app = Flask(__name__)
@@ -64,6 +65,7 @@ def create_room():
     request_json = json.loads(request_data)
     room_name = request_json.get("room_name")
     max_number = request_json.get("max_number")
+    password = request_json.get("password")
     cancel_time = request_json.get("cancel_time")*60 + int(time.time())
     j = json.load(open(ROOMS_LIST_PATH, "r"))
     j[room_name] = {
@@ -74,7 +76,8 @@ def create_room():
         "message_list": [],
         "current_music_time": 0,
         "is_music_pause": True,
-        "current_music": ""
+        "current_music": "",
+        "password": password
     }
     f = open(ROOMS_LIST_PATH, "w")
     f.write(json.dumps(j))
@@ -114,9 +117,12 @@ def enter_room():
     request_data = request.get_data().decode('utf-8')
     request_json = json.loads(request_data)
     room_name = request_json.get("room_name")
+    password = request_json.get("password")
     j = json.load(open(ROOMS_LIST_PATH, "r"))
     if not j[room_name]['status']:
-        return "不行"
+        return "不行",401
+    if not j[room_name]['password']==password:
+        return "不行",402
     j[room_name]['present_number'] += 1
     if j[room_name]['present_number'] >= j[room_name]['max_number']:
         j[room_name]['status'] = False
@@ -161,6 +167,18 @@ def exit_room():
     f.close()
     return "行"
 
+@app.route('/api/get_numbers',methods=['POST'])
+def get_numbers():
+    request_data = request.get_data().decode('utf-8')
+    request_json = json.loads(request_data)
+    room_name = request_json.get("room_name")
+    j = json.load(open(ROOMS_LIST_PATH, "r"))
+    p_number=j[room_name]['present_number']
+    m_number=j[room_name]['max_number']
+    return jsonify({
+        "present_number": p_number,
+        "max_number": m_number
+    })
 
 @app.route('/api/upload', methods=['POST'])
 def upload():
@@ -262,4 +280,4 @@ def init_scheduler():
 
 init_scheduler()
 
-app.run(host='0.0.0.0', port=6132, debug=True)
+app.run(host='0.0.0.0', port=6132, debug=False)
