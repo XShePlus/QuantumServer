@@ -14,10 +14,10 @@ room = {
     "present_number": int,  # 当前人数
     "max_number": int,  # 最大人数
     "cancel_time": int,  # 使用时间戳
-    "current_music":int,
-    "is_music_pause":bool,
-    "current_music_time":int,
-    "password":str
+    "current_music":int, #当前播放的音乐
+    "is_music_pause":bool, #音乐是否暂停
+    "current_music_time":int, # 当前音乐播放进度
+    "password":str #房间密码
 }
 
 app = Flask(__name__)
@@ -28,6 +28,7 @@ tools = Tools()
 TEMP_DIR = './data/temp'
 ROOMS_LIST_PATH = "./data/rooms_list.json"
 tools.check_and_create_file(ROOMS_LIST_PATH)
+low_occupancy_rooms = {}
 
 if json.load(open(ROOMS_LIST_PATH, "r"))!={}:
     for i in json.load(open(ROOMS_LIST_PATH, "r")).keys():
@@ -242,41 +243,58 @@ def stream(room_name, filename):
     return send_from_directory(room_music_dir, filename)
 
 
-
-
-
 def clean_expired_rooms():
+    global low_occupancy_rooms
     try:
+        if tools.is_file_actually_empty(ROOMS_LIST_PATH):
+            return
+
         with open(ROOMS_LIST_PATH, "r", encoding="utf-8") as f:
-            if tools.is_file_actually_empty(ROOMS_LIST_PATH):
-                return
             rooms_data = json.load(f)
 
         current_timestamp = int(time.time())
-        j = json.load(open(ROOMS_LIST_PATH, "r"))
+        rooms_to_delete = []
+
         for room_name, room_info in rooms_data.items():
-            if "cancel_time" in room_info and room_info["cancel_time"] <= current_timestamp:
-                shutil.rmtree(f"./data/rooms/{room_name}")
-                j.pop(room_name)
-        f = open(ROOMS_LIST_PATH, "w")
-        f.write(json.dumps(j))
-        f.close()
-        print(f"定时清理过期房间完成，当前剩余有效房间：{list(j.keys())}")
+            is_expired = "cancel_time" in room_info and room_info["cancel_time"] <= current_timestamp
+            current_people = room_info.get("present_number", 0)
+            is_low_occupancy = False
+
+            if current_people <= 1:
+                count = low_occupancy_rooms.get(room_name, 0) + 1
+                low_occupancy_rooms[room_name] = count
+                if count >= 2:
+                    is_low_occupancy = True
+            else:
+                if room_name in low_occupancy_rooms:
+                    del low_occupancy_rooms[room_name]
+
+            if is_expired or is_low_occupancy:
+                rooms_to_delete.append(room_name)
+
+        if rooms_to_delete:
+            for room_name in rooms_to_delete:
+                room_dir = f"./data/rooms/{room_name}"
+                if os.path.exists(room_dir):
+                    shutil.rmtree(room_dir)
+
+                rooms_data.pop(room_name, None)
+                low_occupancy_rooms.pop(room_name, None)
+
+            with open(ROOMS_LIST_PATH, "w", encoding="utf-8") as f:
+                f.write(json.dumps(rooms_data))
+
+            print(f"清理完成。删除房间: {rooms_to_delete}，剩余有效房间：{list(rooms_data.keys())}")
 
     except Exception as e:
         print(f"定时清理过期房间时出现异常：{str(e)}")
 
 
 def init_scheduler():
-    # 初始化后台调度器
     scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
-    # 添加定时任务：每10分钟执行一次 clean_expired_rooms（可修改间隔）
-    # interval 表示固定时间间隔，seconds=600 即 10分钟，也可使用 minutes=10
-    scheduler.add_job(clean_expired_rooms, 'interval', seconds=600, id="clean_expired_rooms_job")
-    # 启动调度器
+    scheduler.add_job(clean_expired_rooms, 'interval', seconds=300, id="clean_expired_rooms_job")
     scheduler.start()
-    print("定时任务调度器已启动，每10分钟清理一次过期房间")
-
+    print("定时任务调度器已启动")
 
 init_scheduler()
 
