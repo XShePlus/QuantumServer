@@ -181,14 +181,13 @@ def get_numbers():
         "max_number": m_number
     })
 
+
 @app.route('/api/upload', methods=['POST'])
 def upload():
-    # 1. 获取 room_name
     room_name = request.form.get('room_name')
     if not room_name:
         return "Missing room_name", 400
 
-    # 该房间的音乐目录
     room_music_dir = f"./data/rooms/{room_name}/music"
     os.makedirs(room_music_dir, exist_ok=True)
 
@@ -208,20 +207,24 @@ def upload():
         file.save(save_path)
         return jsonify({"msg": f"房间 {room_name} MP3 上传成功", "status": "done"}), 200
 
-    elif ext == '.flac':
+    elif ext in ['.flac', '.aac']:
         temp_path = os.path.join(TEMP_DIR, filename)
-        # 转码后的目标路径也指向房间目录
+        # 目标统一转码为 mp3 存入房间目录
         target_path = os.path.join(room_music_dir, f"{base_name}.mp3")
         file.save(temp_path)
 
         # 启动转码线程
         thread = threading.Thread(target=tools.transcode_to_mp3, args=(temp_path, target_path))
         thread.start()
-        return jsonify({"msg": "FLAC 上传成功，后台转码中...", "status": "processing"}), 202
+
+        format_name = "FLAC" if ext == '.flac' else "AAC"
+        return jsonify({
+            "msg": f"{format_name} 上传成功，后台转码中...",
+            "status": "processing"
+        }), 202
 
     else:
         return "不支持的格式", 400
-
 
 @app.route('/api/list_songs', methods=['POST'])
 def list_songs():
