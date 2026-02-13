@@ -298,7 +298,7 @@ def clean_expired_rooms():
 
 def init_scheduler():
     scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
-    scheduler.add_job(clean_expired_rooms, 'interval', seconds=300, id="clean_expired_rooms_job")
+    scheduler.add_job(clean_expired_rooms, 'interval', seconds=420, id="clean_expired_rooms_job")
     scheduler.start()
     print("定时任务调度器已启动")
 

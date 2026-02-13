@@ -1,6 +1,9 @@
 from pathlib import Path
 import os
 from pydub import AudioSegment
+from mutagen.flac import FLAC
+from mutagen.mp3 import MP3
+from mutagen.id3 import ID3, APIC, error
 class Tools:
     def check_and_create_file(self, file_path):
         file = Path(file_path)
@@ -37,14 +40,49 @@ class Tools:
         except Exception as e:
             raise Exception(f"读取文件失败：{e}") from e
 
-    @staticmethod  # 添加这个装饰器
-    def transcode_to_mp3(source_path, target_path):  # 这样定义就只收两个参数了
+    @staticmethod
+    def transcode_to_mp3(source_path, target_path):
         try:
+            # 提取封面数据
+            cover_data = None
+            try:
+                flac_file = FLAC(source_path)
+                if flac_file.pictures:
+                    cover_data = flac_file.pictures[0].data
+            except Exception as e:
+                print(f"提取封面失败: {e}")
+
+            # 执行转码
             audio = AudioSegment.from_file(source_path)
             audio.export(target_path, format="mp3", bitrate="320k")
-            print(f"转码成功: {target_path}")
+
+            # 封面嵌入MP3
+            if cover_data:
+                try:
+                    mp3_file = MP3(target_path, ID3=ID3)
+                    try:
+                        mp3_file.add_tags()
+                    except error:
+                        pass
+
+                    mp3_file.tags.add(
+                        APIC(
+                            encoding=3,
+                            mime='image/jpeg',
+                            type=3,
+                            desc=u'Cover',
+                            data=cover_data
+                        )
+                    )
+                    mp3_file.save()
+                    print("封面嵌入成功")
+                except Exception as e:
+                    print(f"写入封面失败: {e}")
+
+            print(f"转码完成: {target_path}")
+
         except Exception as e:
-            print(f"转码失败: {str(e)}")
+            print(f"转码异常: {str(e)}")
         finally:
             if os.path.exists(source_path):
                 os.remove(source_path)
