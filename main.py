@@ -1,12 +1,9 @@
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
-import json
-import time
-import threading
-import os
+import threading, os, time, json, shutil, sys
 from Tools import Tools
 from apscheduler.schedulers.background import BackgroundScheduler
-import shutil
+
 # 模板room
 room = {
     "status": bool,  # 可否加入
@@ -14,10 +11,10 @@ room = {
     "present_number": int,  # 当前人数
     "max_number": int,  # 最大人数
     "cancel_time": int,  # 使用时间戳
-    "current_music":int, #当前播放的音乐
-    "is_music_pause":bool, #音乐是否暂停
-    "current_music_time":int, # 当前音乐播放进度
-    "password":str #房间密码
+    "current_music": int,  # 当前播放的音乐
+    "is_music_pause": bool,  # 音乐是否暂停
+    "current_music_time": int,  # 当前音乐播放进度
+    "password": str  # 房间密码
 }
 
 app = Flask(__name__)
@@ -30,12 +27,12 @@ ROOMS_LIST_PATH = "./data/rooms_list.json"
 tools.check_and_create_file(ROOMS_LIST_PATH)
 low_occupancy_rooms = {}
 
-if json.load(open(ROOMS_LIST_PATH, "r"))!={}:
+if json.load(open(ROOMS_LIST_PATH, "r")) != {}:
     for i in json.load(open(ROOMS_LIST_PATH, "r")).keys():
         os.makedirs(f"./data/rooms/{i}/music", exist_ok=True)
 
-
 os.makedirs(TEMP_DIR, exist_ok=True)
+
 
 @app.route('/api/connect', methods=['POST'])
 def verify_connect():
@@ -67,7 +64,7 @@ def create_room():
     room_name = request_json.get("room_name")
     max_number = request_json.get("max_number")
     password = request_json.get("password")
-    cancel_time = request_json.get("cancel_time")*60 + int(time.time())
+    cancel_time = request_json.get("cancel_time") * 60 + int(time.time())
     j = json.load(open(ROOMS_LIST_PATH, "r"))
     j[room_name] = {
         "status": True,
@@ -84,6 +81,7 @@ def create_room():
     f.write(json.dumps(j))
     f.close()
     return "行"
+
 
 @app.route('/api/get_music_status', methods=['POST'])
 def get_music_status():
@@ -121,9 +119,9 @@ def enter_room():
     password = request_json.get("password")
     j = json.load(open(ROOMS_LIST_PATH, "r"))
     if not j[room_name]['status']:
-        return "不行",401
-    if not j[room_name]['password']==password:
-        return "不行",402
+        return "不行", 401
+    if not j[room_name]['password'] == password:
+        return "不行", 402
     j[room_name]['present_number'] += 1
     if j[room_name]['present_number'] >= j[room_name]['max_number']:
         j[room_name]['status'] = False
@@ -131,6 +129,7 @@ def enter_room():
     f.write(json.dumps(j))
     f.close()
     return "行"
+
 
 @app.route('/api/get_message', methods=['POST'])
 def get_message():
@@ -140,12 +139,13 @@ def get_message():
     j = json.load(open(ROOMS_LIST_PATH, "r"))
     return j[room_name]['message_list']
 
+
 @app.route('/api/append_message', methods=['POST'])
 def append_message():
     request_data = request.get_data().decode('utf-8')
     request_json = json.loads(request_data)
     room_name = request_json.get("room_name")
-    message=request_json.get("message")
+    message = request_json.get("message")
     print(message)
     j = json.load(open(ROOMS_LIST_PATH, "r"))
     j[room_name]['message_list'].append(message)
@@ -153,6 +153,7 @@ def append_message():
     f.write(json.dumps(j))
     f.close()
     return "行"
+
 
 @app.route('/api/exit_room', methods=['POST'])
 def exit_room():
@@ -168,14 +169,15 @@ def exit_room():
     f.close()
     return "行"
 
-@app.route('/api/get_numbers',methods=['POST'])
+
+@app.route('/api/get_numbers', methods=['POST'])
 def get_numbers():
     request_data = request.get_data().decode('utf-8')
     request_json = json.loads(request_data)
     room_name = request_json.get("room_name")
     j = json.load(open(ROOMS_LIST_PATH, "r"))
-    p_number=j[room_name]['present_number']
-    m_number=j[room_name]['max_number']
+    p_number = j[room_name]['present_number']
+    m_number = j[room_name]['max_number']
     return jsonify({
         "present_number": p_number,
         "max_number": m_number
@@ -225,6 +227,7 @@ def upload():
 
     else:
         return "不支持的格式", 400
+
 
 @app.route('/api/list_songs', methods=['POST'])
 def list_songs():
@@ -299,6 +302,38 @@ def init_scheduler():
     scheduler.start()
     print("定时任务调度器已启动")
 
-init_scheduler()
 
+def console_listener():
+    while True:
+        cmd = input().strip().lower()
+
+        if cmd == "ls":
+            with open(ROOMS_LIST_PATH, "r", encoding="utf-8") as f:
+                rooms_data = json.load(f)
+            if not rooms_data:
+                print("当前无房间")
+            else:
+                for name, info in rooms_data.items():
+                    print(f"房间: {name} | 人数: {info['present_number']} | 状态: {info['status']}")
+
+        elif cmd.startswith("rm "):
+            room_name = cmd.split(" ", 1)[1]
+            with open(ROOMS_LIST_PATH, "r", encoding="utf-8") as f:
+                rooms_data = json.load(f)
+            if room_name in rooms_data:
+                shutil.rmtree(f"./data/rooms/{room_name}", ignore_errors=True)
+                del rooms_data[room_name]
+                with open(ROOMS_LIST_PATH, "w", encoding="utf-8") as f:
+                    f.write(json.dumps(rooms_data))
+                print(f"已强制删除: {room_name}")
+            else:
+                print("房间不存在")
+
+        elif cmd == "exit":
+            print("正在关闭服务器...")
+            os._exit(0)
+
+
+init_scheduler()
+threading.Thread(target=console_listener, daemon=True).start()
 app.run(host='0.0.0.0', port=6132, debug=False)
