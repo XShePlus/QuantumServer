@@ -306,6 +306,21 @@ def upload():
     return "Unsupported format", 400
 
 
+@app.route('/api/append_message', methods=['POST'])
+def append_message():
+    request_data = request.get_data().decode('utf-8')
+    request_json = json.loads(request_data)
+    room_name = request_json.get("room_name")
+    message = request_json.get("message")
+    print(message)
+    j = json.load(open(ROOMS_LIST_PATH, "r"))
+    j[room_name]['message_list'].append(message)
+    f = open(ROOMS_LIST_PATH, "w")
+    f.write(json.dumps(j))
+    f.close()
+    return "行"
+
+
 @app.route('/api/list_songs', methods=['POST'])
 def list_songs():
     room_name = request.get_json().get("room_name")
