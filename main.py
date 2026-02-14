@@ -348,22 +348,33 @@ def init_scheduler():
 
 def console_listener():
     while True:
-        try:
-            cmd = input().strip().lower()
-            if cmd == "ls":
-                with open(ROOMS_LIST_PATH, "r") as f:
-                    data = json.load(f)
-                for n, i in data.items():
-                    print(f"房间:{n} | 人数:{i['present_number']}/{i['max_number']} | 在线:{i['users_list']}")
-            elif cmd.startswith("rm "):
-                name = cmd.split(" ")[1]
-                # ... 逻辑同原代码 ...
-                print(f"已删除 {name}")
-            elif cmd == "exit":
-                os._exit(0)
-        except Exception:
-            pass
+        cmd = input().strip().lower()
 
+        if cmd == "ls":
+            with open(ROOMS_LIST_PATH, "r", encoding="utf-8") as f:
+                rooms_data = json.load(f)
+            if not rooms_data:
+                print("当前无房间")
+            else:
+                for name, info in rooms_data.items():
+                    print(f"房间: {name} | 人数: {info['present_number']} | 状态: {info['status']}")
+
+        elif cmd.startswith("rm "):
+            room_name = cmd.split(" ", 1)[1]
+            with open(ROOMS_LIST_PATH, "r", encoding="utf-8") as f:
+                rooms_data = json.load(f)
+            if room_name in rooms_data:
+                shutil.rmtree(f"./data/rooms/{room_name}", ignore_errors=True)
+                del rooms_data[room_name]
+                with open(ROOMS_LIST_PATH, "w", encoding="utf-8") as f:
+                    f.write(json.dumps(rooms_data))
+                print(f"已强制删除: {room_name}")
+            else:
+                print("房间不存在")
+
+        elif cmd == "exit":
+            print("正在关闭服务器...")
+            os._exit(0)
 
 if __name__ == '__main__':
     init_scheduler()
