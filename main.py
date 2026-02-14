@@ -116,11 +116,15 @@ def verify_connect():
     if tools.is_file_actually_empty(ROOMS_LIST_PATH):
         return jsonify({"code": 900, "content": "null"})
 
-    j = json.load(open(ROOMS_LIST_PATH, "r"))
-    return jsonify({
-        "room_name_list": list(j.keys()),
-        "room_status_list": [j[i]["status"] for i in j]
-    })
+    try:
+        j = json.load(open(ROOMS_LIST_PATH, "r"))
+        return jsonify({
+            "room_name_list": list(j.keys()),
+            "room_status_list": [j[i].get("status", True) for i in j]
+        })
+    except Exception as e:
+        print(f"Error in verify_connect: {e}")
+        return jsonify({"code": 900, "content": "null"})
 
 
 @app.route('/api/create_room', methods=['POST'])
@@ -262,6 +266,19 @@ def exit_room():
             f.write(json.dumps(j))
     return "行"
 
+
+@app.route('/api/get_numbers', methods=['POST'])
+def get_numbers():
+    request_data = request.get_data().decode('utf-8')
+    request_json = json.loads(request_data)
+    room_name = request_json.get("room_name")
+    j = json.load(open(ROOMS_LIST_PATH, "r"))
+    p_number = j[room_name]['present_number']
+    m_number = j[room_name]['max_number']
+    return jsonify({
+        "present_number": p_number,
+        "max_number": m_number
+    })
 
 @app.route('/api/upload', methods=['POST'])
 def upload():
