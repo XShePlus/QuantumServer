@@ -4,17 +4,17 @@ import threading, os, time, json, shutil, sys
 from Tools import Tools
 from apscheduler.schedulers.background import BackgroundScheduler
 
-# 模板room
-room = {
-    "status": bool,  # 可否加入
-    "message_list": list,  # 消息列表eg: ["a:hhh","b:hhh"]
-    "present_number": int,  # 当前人数
-    "max_number": int,  # 最大人数
-    "cancel_time": int,  # 使用时间戳
-    "current_music": int,  # 当前播放的音乐
-    "is_music_pause": bool,  # 音乐是否暂停
-    "current_music_time": int,  # 当前音乐播放进度
-    "password": str  # 房间密码
+room_template = {
+    "status": True,
+    "message_list": [],
+    "present_number": 0,
+    "max_number": 0,
+    "cancel_time": 0,
+    "current_music": "",
+    "is_music_pause": True,
+    "current_music_time": 0,
+    "password": "",
+    "users_list": []
 }
 
 app = Flask(__name__)
@@ -25,46 +25,112 @@ tools = Tools()
 TEMP_DIR = './data/temp'
 ROOMS_LIST_PATH = "./data/rooms_list.json"
 tools.check_and_create_file(ROOMS_LIST_PATH)
-low_occupancy_rooms = {}
 
-if json.load(open(ROOMS_LIST_PATH, "r")) != {}:
-    for i in json.load(open(ROOMS_LIST_PATH, "r")).keys():
-        os.makedirs(f"./data/rooms/{i}/music", exist_ok=True)
+user_activity_map = {}
 
-os.makedirs(TEMP_DIR, exist_ok=True)
+if not os.path.exists(TEMP_DIR):
+    os.makedirs(TEMP_DIR, exist_ok=True)
+
+try:
+    with open(ROOMS_LIST_PATH, "r", encoding="utf-8") as f:
+        existing_rooms = json.load(f)
+        for room_name in existing_rooms.keys():
+            os.makedirs(f"./data/rooms/{room_name}/music", exist_ok=True)
+except Exception:
+    pass
+
+
+
+def update_user_activity(user_name, room_name):
+    if user_name and room_name:
+        user_activity_map[user_name] = {
+            "room": room_name,
+            "last_time": int(time.time())
+        }
+
+
+def clean_expired_rooms():
+    try:
+        current_time = int(time.time())
+        with open(ROOMS_LIST_PATH, "r", encoding="utf-8") as f:
+            rooms_data = json.load(f)
+
+        rooms_to_delete = []
+        for name, info in rooms_data.items():
+            if current_time > info.get('cancel_time', 0):
+                rooms_to_delete.append(name)
+
+        if rooms_to_delete:
+            for name in rooms_to_delete:
+                shutil.rmtree(f"./data/rooms/{name}", ignore_errors=True)
+                del rooms_data[name]
+            with open(ROOMS_LIST_PATH, "w", encoding="utf-8") as f:
+                f.write(json.dumps(rooms_data))
+            print(f"已清理到期房间: {rooms_to_delete}")
+    except Exception as e:
+        print(f"清理房间任务异常: {e}")
+
+
+def clean_inactive_users():
+    global user_activity_map
+    current_time = int(time.time())
+    timeout = 45  # 45秒超时
+
+    try:
+        with open(ROOMS_LIST_PATH, "r", encoding="utf-8") as f:
+            rooms_data = json.load(f)
+
+        changed = False
+        users_to_remove = []
+
+        # 遍历内存中的活跃表
+        for user, info in list(user_activity_map.items()):
+            if current_time - info["last_time"] > timeout:
+                room_name = info["room"]
+                if room_name in rooms_data:
+                    if user in rooms_data[room_name]["users_list"]:
+                        rooms_data[room_name]["users_list"].remove(user)
+                        # 重新计算人数
+                        rooms_data[room_name]["present_number"] = len(rooms_data[room_name]["users_list"])
+                        # 若人数空出，恢复房间状态为可加入
+                        if rooms_data[room_name]["present_number"] < rooms_data[room_name]["max_number"]:
+                            rooms_data[room_name]["status"] = True
+                        changed = True
+                users_to_remove.append(user)
+
+        # 从内存表中抹除
+        for user in users_to_remove:
+            del user_activity_map[user]
+
+        if changed:
+            with open(ROOMS_LIST_PATH, "w", encoding="utf-8") as f:
+                f.write(json.dumps(rooms_data))
+            print(f"自动清理掉线用户: {users_to_remove}")
+
+    except Exception as e:
+        print(f"清理用户逻辑异常: {e}")
 
 
 @app.route('/api/connect', methods=['POST'])
 def verify_connect():
-    request_data = request.get_data()
-
-    print(f"收到{request_data}")
-
     if tools.is_file_actually_empty(ROOMS_LIST_PATH):
-        return jsonify({
-            "code": 900,
-            "content": "null"
-        })
-    else:
-        j = json.load(open(ROOMS_LIST_PATH, "r"))
-        s = []
-        for i in list(j):
-            s.append(j[i]["status"])
-        print(list(j) + list(s))
-        return jsonify({
-            "room_name_list": list(j),
-            "room_status_list": list(s)
-        })
+        return jsonify({"code": 900, "content": "null"})
+
+    j = json.load(open(ROOMS_LIST_PATH, "r"))
+    return jsonify({
+        "room_name_list": list(j.keys()),
+        "room_status_list": [j[i]["status"] for i in j]
+    })
 
 
 @app.route('/api/create_room', methods=['POST'])
 def create_room():
-    request_data = request.get_data().decode('utf-8')
-    request_json = json.loads(request_data)
+    request_json = request.get_json()
     room_name = request_json.get("room_name")
     max_number = request_json.get("max_number")
     password = request_json.get("password")
     cancel_time = request_json.get("cancel_time") * 60 + int(time.time())
+
     j = json.load(open(ROOMS_LIST_PATH, "r"))
     j[room_name] = {
         "status": True,
@@ -75,11 +141,13 @@ def create_room():
         "current_music_time": 0,
         "is_music_pause": True,
         "current_music": "",
-        "password": password
+        "password": password,
+        "users_list": []
     }
-    f = open(ROOMS_LIST_PATH, "w")
-    f.write(json.dumps(j))
-    f.close()
+    with open(ROOMS_LIST_PATH, "w") as f:
+        f.write(json.dumps(j))
+
+    os.makedirs(f"./data/rooms/{room_name}/music", exist_ok=True)
     return "行"
 
 
@@ -87,12 +155,21 @@ def create_room():
 def get_music_status():
     request_data = request.get_json()
     room_name = request_data.get("room_name")
+    user_name = request_data.get("user_name")
+
+    # 核心：高频更新用户活跃度
+    if user_name and room_name:
+        update_user_activity(user_name, room_name)
+
     j = json.load(open(ROOMS_LIST_PATH, "r"))
-    r = j.get(room_name, {})
+    if room_name not in j:
+        return "房间不存在", 404
+
+    r = j[room_name]
     return jsonify({
-        "current_music_time": r.get("current_music_time", 0),
-        "is_music_pause": r.get("is_music_pause", True),
-        "current_music": r.get("current_music", "")
+        "current_music": r['current_music'],
+        "is_music_pause": r['is_music_pause'],
+        "current_music_time": r['current_music_time']
     })
 
 
@@ -100,9 +177,12 @@ def get_music_status():
 def update_music_status():
     request_data = request.get_json()
     room_name = request_data.get("room_name")
+    user_name = request_data.get("user_name")  # 建议前端也带上这个
+
+    update_user_activity(user_name, room_name)
+
     j = json.load(open(ROOMS_LIST_PATH, "r"))
     if room_name in j:
-        # 更新服务端数据
         j[room_name]["current_music_time"] = request_data.get("current_music_time")
         j[room_name]["is_music_pause"] = request_data.get("is_music_pause")
         j[room_name]["current_music"] = request_data.get("current_music")
@@ -113,227 +193,147 @@ def update_music_status():
 
 @app.route('/api/enter_room', methods=['POST'])
 def enter_room():
-    request_data = request.get_data().decode('utf-8')
-    request_json = json.loads(request_data)
-    room_name = request_json.get("room_name")
-    password = request_json.get("password")
+    request_data = request.get_json()
+    room_name = request_data.get("room_name")
+    password = request_data.get("password")
+    user_name = request_data.get("user_name")
+
     j = json.load(open(ROOMS_LIST_PATH, "r"))
+
+    if room_name not in j:
+        return "房间不存在", 404
+
+    # 判别禁止重复进入
+    if user_name in j[room_name]['users_list']:
+        return "您已在房间中，请勿重复进入", 403
+
     if not j[room_name]['status']:
-        return "不行", 401
-    if not j[room_name]['password'] == password:
-        return "不行", 402
-    j[room_name]['present_number'] += 1
+        return "房间已满", 401
+
+    if j[room_name]['password'] != password:
+        return "密码错误", 402
+
+    # 加入房间
+    j[room_name]['users_list'].append(user_name)
+    j[room_name]['present_number'] = len(j[room_name]['users_list'])
+
+    update_user_activity(user_name, room_name)
+
     if j[room_name]['present_number'] >= j[room_name]['max_number']:
         j[room_name]['status'] = False
-    f = open(ROOMS_LIST_PATH, "w")
-    f.write(json.dumps(j))
-    f.close()
+
+    with open(ROOMS_LIST_PATH, "w") as f:
+        f.write(json.dumps(j))
     return "行"
 
 
 @app.route('/api/get_message', methods=['POST'])
 def get_message():
-    request_data = request.get_data().decode('utf-8')
-    request_json = json.loads(request_data)
-    room_name = request_json.get("room_name")
-    j = json.load(open(ROOMS_LIST_PATH, "r"))
-    return j[room_name]['message_list']
+    request_data = request.get_json()
+    room_name = request_data.get("room_name")
+    user_name = request_data.get("user_name")
 
+    update_user_activity(user_name, room_name)
 
-@app.route('/api/append_message', methods=['POST'])
-def append_message():
-    request_data = request.get_data().decode('utf-8')
-    request_json = json.loads(request_data)
-    room_name = request_json.get("room_name")
-    message = request_json.get("message")
-    print(message)
     j = json.load(open(ROOMS_LIST_PATH, "r"))
-    j[room_name]['message_list'].append(message)
-    f = open(ROOMS_LIST_PATH, "w")
-    f.write(json.dumps(j))
-    f.close()
-    return "行"
+    if room_name in j:
+        return jsonify(j[room_name]['message_list'])
+    return jsonify([])
 
 
 @app.route('/api/exit_room', methods=['POST'])
 def exit_room():
-    request_data = request.get_data().decode('utf-8')
-    request_json = json.loads(request_data)
+    request_json = request.get_json()
     room_name = request_json.get("room_name")
+    user_name = request_json.get("user_name")
+
     j = json.load(open(ROOMS_LIST_PATH, "r"))
-    if j[room_name]['present_number'] < j[room_name]['max_number']:
-        j[room_name]['status'] = True
-    j[room_name]['present_number'] -= 1
-    f = open(ROOMS_LIST_PATH, "w")
-    f.write(json.dumps(j))
-    f.close()
+    if room_name in j and user_name in j[room_name]['users_list']:
+        j[room_name]['users_list'].remove(user_name)
+        j[room_name]['present_number'] = len(j[room_name]['users_list'])
+        if j[room_name]['present_number'] < j[room_name]['max_number']:
+            j[room_name]['status'] = True
+
+        # 移除活跃记录
+        if user_name in user_activity_map:
+            del user_activity_map[user_name]
+
+        with open(ROOMS_LIST_PATH, "w") as f:
+            f.write(json.dumps(j))
     return "行"
-
-
-@app.route('/api/get_numbers', methods=['POST'])
-def get_numbers():
-    request_data = request.get_data().decode('utf-8')
-    request_json = json.loads(request_data)
-    room_name = request_json.get("room_name")
-    j = json.load(open(ROOMS_LIST_PATH, "r"))
-    p_number = j[room_name]['present_number']
-    m_number = j[room_name]['max_number']
-    return jsonify({
-        "present_number": p_number,
-        "max_number": m_number
-    })
 
 
 @app.route('/api/upload', methods=['POST'])
 def upload():
     room_name = request.form.get('room_name')
-    if not room_name:
-        return "Missing room_name", 400
-
-    room_music_dir = f"./data/rooms/{room_name}/music"
-    os.makedirs(room_music_dir, exist_ok=True)
-
     if 'file' not in request.files:
         return "No file", 400
 
     file = request.files['file']
-    filename = file.filename
-    if not filename:
-        return "Empty filename", 400
+    room_music_dir = f"./data/rooms/{room_name}/music"
+    os.makedirs(room_music_dir, exist_ok=True)
 
+    filename = file.filename
     base_name = os.path.splitext(filename)[0]
     ext = os.path.splitext(filename)[1].lower()
 
     if ext == '.mp3':
-        save_path = os.path.join(room_music_dir, filename)
-        file.save(save_path)
-        return jsonify({"msg": f"房间 {room_name} MP3 上传成功", "status": "done"}), 200
-
+        file.save(os.path.join(room_music_dir, filename))
+        return jsonify({"status": "done"}), 200
     elif ext in ['.flac', '.aac']:
         temp_path = os.path.join(TEMP_DIR, filename)
-        # 目标统一转码为 mp3 存入房间目录
         target_path = os.path.join(room_music_dir, f"{base_name}.mp3")
         file.save(temp_path)
-
-        # 启动转码线程
-        thread = threading.Thread(target=tools.transcode_to_mp3, args=(temp_path, target_path))
-        thread.start()
-
-        format_name = "FLAC" if ext == '.flac' else "AAC"
-        return jsonify({
-            "msg": f"{format_name} 上传成功，后台转码中...",
-            "status": "processing"
-        }), 202
-
-    else:
-        return "不支持的格式", 400
+        threading.Thread(target=tools.transcode_to_mp3, args=(temp_path, target_path)).start()
+        return jsonify({"status": "processing"}), 202
+    return "Unsupported format", 400
 
 
 @app.route('/api/list_songs', methods=['POST'])
 def list_songs():
-    request_data = request.get_json()
-    room_name = request_data.get("room_name")
-
-    room_music_dir = f"./data/rooms/{room_name}/music"
-
-    if not os.path.exists(room_music_dir):
+    room_name = request.get_json().get("room_name")
+    dir_path = f"./data/rooms/{room_name}/music"
+    if not os.path.exists(dir_path):
         return jsonify([])
-
-    songs = [f for f in os.listdir(room_music_dir) if f.lower().endswith('.mp3')]
+    songs = [f for f in os.listdir(dir_path) if f.lower().endswith('.mp3')]
     return jsonify(songs)
 
 
 @app.route('/api/stream/<room_name>/<filename>')
 def stream(room_name, filename):
-    room_music_dir = f"./data/rooms/{room_name}/music"
-    return send_from_directory(room_music_dir, filename)
-
-
-def clean_expired_rooms():
-    global low_occupancy_rooms
-    try:
-        if tools.is_file_actually_empty(ROOMS_LIST_PATH):
-            return
-
-        with open(ROOMS_LIST_PATH, "r", encoding="utf-8") as f:
-            rooms_data = json.load(f)
-
-        current_timestamp = int(time.time())
-        rooms_to_delete = []
-
-        for room_name, room_info in rooms_data.items():
-            is_expired = "cancel_time" in room_info and room_info["cancel_time"] <= current_timestamp
-            current_people = room_info.get("present_number", 0)
-            is_low_occupancy = False
-
-            if current_people <= 1:
-                count = low_occupancy_rooms.get(room_name, 0) + 1
-                low_occupancy_rooms[room_name] = count
-                if count >= 2:
-                    is_low_occupancy = True
-            else:
-                if room_name in low_occupancy_rooms:
-                    del low_occupancy_rooms[room_name]
-
-            if is_expired or is_low_occupancy:
-                rooms_to_delete.append(room_name)
-
-        if rooms_to_delete:
-            for room_name in rooms_to_delete:
-                room_dir = f"./data/rooms/{room_name}"
-                if os.path.exists(room_dir):
-                    shutil.rmtree(room_dir)
-
-                rooms_data.pop(room_name, None)
-                low_occupancy_rooms.pop(room_name, None)
-
-            with open(ROOMS_LIST_PATH, "w", encoding="utf-8") as f:
-                f.write(json.dumps(rooms_data))
-
-            print(f"清理完成。删除房间: {rooms_to_delete}，剩余有效房间：{list(rooms_data.keys())}")
-
-    except Exception as e:
-        print(f"定时清理过期房间时出现异常：{str(e)}")
+    return send_from_directory(f"./data/rooms/{room_name}/music", filename)
 
 
 def init_scheduler():
     scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
-    scheduler.add_job(clean_expired_rooms, 'interval', seconds=420, id="clean_expired_rooms_job")
+    # 每分钟清理一次掉线用户
+    scheduler.add_job(clean_inactive_users, 'interval', seconds=60, id="clean_users_job")
+    # 每7分钟清理一次到期房间
+    scheduler.add_job(clean_expired_rooms, 'interval', seconds=420, id="clean_rooms_job")
     scheduler.start()
-    print("定时任务调度器已启动")
+    print("后台调度任务已启动: 用户活跃监测(60s), 房间有效期检查(420s)")
 
 
 def console_listener():
     while True:
-        cmd = input().strip().lower()
-
-        if cmd == "ls":
-            with open(ROOMS_LIST_PATH, "r", encoding="utf-8") as f:
-                rooms_data = json.load(f)
-            if not rooms_data:
-                print("当前无房间")
-            else:
-                for name, info in rooms_data.items():
-                    print(f"房间: {name} | 人数: {info['present_number']} | 状态: {info['status']}")
-
-        elif cmd.startswith("rm "):
-            room_name = cmd.split(" ", 1)[1]
-            with open(ROOMS_LIST_PATH, "r", encoding="utf-8") as f:
-                rooms_data = json.load(f)
-            if room_name in rooms_data:
-                shutil.rmtree(f"./data/rooms/{room_name}", ignore_errors=True)
-                del rooms_data[room_name]
-                with open(ROOMS_LIST_PATH, "w", encoding="utf-8") as f:
-                    f.write(json.dumps(rooms_data))
-                print(f"已强制删除: {room_name}")
-            else:
-                print("房间不存在")
-
-        elif cmd == "exit":
-            print("正在关闭服务器...")
-            os._exit(0)
+        try:
+            cmd = input().strip().lower()
+            if cmd == "ls":
+                with open(ROOMS_LIST_PATH, "r") as f:
+                    data = json.load(f)
+                for n, i in data.items():
+                    print(f"房间:{n} | 人数:{i['present_number']}/{i['max_number']} | 在线:{i['users_list']}")
+            elif cmd.startswith("rm "):
+                name = cmd.split(" ")[1]
+                # ... 逻辑同原代码 ...
+                print(f"已删除 {name}")
+            elif cmd == "exit":
+                os._exit(0)
+        except Exception:
+            pass
 
 
-init_scheduler()
-threading.Thread(target=console_listener, daemon=True).start()
-app.run(host='0.0.0.0', port=6132, debug=False)
+if __name__ == '__main__':
+    init_scheduler()
+    threading.Thread(target=console_listener, daemon=True).start()
+    app.run(host='0.0.0.0', port=6132, debug=False)
