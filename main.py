@@ -327,12 +327,15 @@ def list_songs():
     dir_path = f"./data/rooms/{room_name}/music"
     if not os.path.exists(dir_path):
         return jsonify([])
-    songs = [f for f in os.listdir(dir_path) if f.lower().endswith('.mp3')]
-    return jsonify(songs)
 
+    songs = [os.path.splitext(f)[0] for f in os.listdir(dir_path) if f.lower().endswith('.mp3')]
+
+    return jsonify(songs)
 
 @app.route('/api/stream/<room_name>/<filename>')
 def stream(room_name, filename):
+    if not filename.lower().endswith('.mp3'):
+        filename = f"{filename}.mp3"
     return send_from_directory(f"./data/rooms/{room_name}/music", filename)
 
 
