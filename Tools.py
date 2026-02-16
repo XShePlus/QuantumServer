@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+import subprocess
 from pydub import AudioSegment
 from mutagen.flac import FLAC
 from mutagen.mp3 import MP3
