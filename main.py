@@ -1,3 +1,9 @@
+try:
+    import audioop
+except ImportError:
+    import audioop_lts as audioop
+    import sys
+    sys.modules['audioop'] = audioop
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import threading, os, time, json, shutil, sys
@@ -283,28 +289,29 @@ def get_numbers():
 @app.route('/api/upload', methods=['POST'])
 def upload():
     room_name = request.form.get('room_name')
-    if 'file' not in request.files:
+    file = request.files.get('file')
+    if not file:
         return "No file", 400
 
-    file = request.files['file']
     room_music_dir = f"./data/rooms/{room_name}/music"
     os.makedirs(room_music_dir, exist_ok=True)
+    os.makedirs(TEMP_DIR, exist_ok=True)
 
-    filename = file.filename
-    base_name = os.path.splitext(filename)[0]
-    ext = os.path.splitext(filename)[1].lower()
+    temp_filename = f"temp_{int(time.time())}_{file.filename}"
+    temp_path = os.path.join(TEMP_DIR, temp_filename)
+    file.save(temp_path)
 
-    if ext == '.mp3':
-        file.save(os.path.join(room_music_dir, filename))
-        return jsonify({"status": "done"}), 200
-    elif ext in ['.flac', '.aac']:
-        temp_path = os.path.join(TEMP_DIR, filename)
-        target_path = os.path.join(room_music_dir, f"{base_name}.mp3")
-        file.save(temp_path)
-        threading.Thread(target=tools.transcode_to_mp3, args=(temp_path, target_path)).start()
-        return jsonify({"status": "processing"}), 202
-    return "Unsupported format", 400
+    final_title = tools.get_music_title(temp_path, file.filename)
 
+    threading.Thread(
+        target=tools.transcode_to_mp3,
+        args=(temp_path, room_music_dir, final_title)
+    ).start()
+
+    return jsonify({
+        "status": "processing",
+        "display_name": final_title
+    }), 202
 
 @app.route('/api/append_message', methods=['POST'])
 def append_message():

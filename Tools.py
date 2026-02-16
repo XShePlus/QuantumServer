@@ -41,48 +41,57 @@ class Tools:
             raise Exception(f"读取文件失败：{e}") from e
 
     @staticmethod
-    def transcode_to_mp3(source_path, target_path):
+    def get_music_title(file_path, default_name):
         try:
-            # 提取封面数据
-            cover_data = None
-            try:
-                flac_file = FLAC(source_path)
-                if flac_file.pictures:
-                    cover_data = flac_file.pictures[0].data
-            except Exception as e:
-                print(f"提取封面失败: {e}")
+            cmd = [
+                'ffprobe', '-v', 'quiet',
+                '-show_entries', 'format_tags=title',
+                '-of', 'json', file_path
+            ]
+            result = subprocess.check_output(cmd).decode('utf-8')
+            data = json.loads(result)
 
-            # 执行转码
-            audio = AudioSegment.from_file(source_path)
-            audio.export(target_path, format="mp3", bitrate="320k")
+            title = data.get('format', {}).get('tags', {}).get('title')
 
-            # 封面嵌入MP3
-            if cover_data:
-                try:
-                    mp3_file = MP3(target_path, ID3=ID3)
-                    try:
-                        mp3_file.add_tags()
-                    except error:
-                        pass
-
-                    mp3_file.tags.add(
-                        APIC(
-                            encoding=3,
-                            mime='image/jpeg',
-                            type=3,
-                            desc=u'Cover',
-                            data=cover_data
-                        )
-                    )
-                    mp3_file.save()
-                    print("封面嵌入成功")
-                except Exception as e:
-                    print(f"写入封面失败: {e}")
-
-            print(f"转码完成: {target_path}")
-
+            if title and title.strip():
+                invalid_chars = '<>:"/\\|?*'
+                for char in invalid_chars:
+                    title = title.replace(char, '')
+                return title.strip()
         except Exception as e:
-            print(f"转码异常: {str(e)}")
+            print(f"提取元数据标题失败: {e}")
+
+        return os.path.splitext(default_name)[0]
+
+    @staticmethod
+    def transcode_to_mp3(source_path, target_dir, final_title):
+        try:
+            target_path = os.path.join(target_dir, f"{final_title}.mp3")
+
+            # 探测是否有封面流
+            probe_cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name',
+                         '-of', 'csv=p=0', source_path]
+            has_cover = subprocess.check_output(probe_cmd).decode('utf-8').strip()
+
+            if has_cover:
+                cmd = [
+                    'ffmpeg', '-y', '-i', source_path,
+                    '-map', '0:a:0', '-map', '0:v:0?',
+                    '-c:a', 'libmp3lame', '-ab', '192k',
+                    '-c:v', 'copy', '-id3v2_version', '3',
+                    target_path
+                ]
+            else:
+                cmd = [
+                    'ffmpeg', '-y', '-i', source_path,
+                    '-vn', '-acodec', 'libmp3lame', '-ab', '192k',
+                    target_path
+                ]
+
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            print(f"最终生成文件: {target_path}")
+        except Exception as e:
+            print(f"转码或重命名过程出错: {e}")
         finally:
             if os.path.exists(source_path):
                 os.remove(source_path)
