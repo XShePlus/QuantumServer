@@ -1,14 +1,15 @@
 try:
     import audioop
 except ImportError:
-    import audioop_lts as audioop
+    import audioop_lts as audioop # type: ignore
     import sys
     sys.modules['audioop'] = audioop
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
-import threading, os, time, json, shutil, sys
+import threading, os, time, json, shutil, sys,shlex
 from Tools import Tools
 from apscheduler.schedulers.background import BackgroundScheduler
+from threading import Lock
 
 room_template = {
     "status": True,
@@ -20,22 +21,31 @@ room_template = {
     "is_music_pause": True,
     "current_music_time": 0,
     "password": "",
-    "users_list": []
+    "users_list": [],
+    "is_playing_example": False,
+    "last_update_time": 0, 
+    "last_operator": ""    
 }
 
 app = Flask(__name__)
 CORS(app, resources=r"/*")
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
 
+file_lock = Lock()
+version_lock = Lock()
 tools = Tools()
 TEMP_DIR = './data/temp'
 ROOMS_LIST_PATH = "./data/rooms_list.json"
+EXAMPLE_MUSICS = "./example_musics"
+VERSION_PATH = "./data/version.json"
+
+tools.check_and_create_file(VERSION_PATH)
 tools.check_and_create_file(ROOMS_LIST_PATH)
 
 user_activity_map = {}
 
-if not os.path.exists(TEMP_DIR):
-    os.makedirs(TEMP_DIR, exist_ok=True)
+for path in [TEMP_DIR, EXAMPLE_MUSICS]:
+        os.makedirs(path, exist_ok=True)
 
 try:
     with open(ROOMS_LIST_PATH, "r", encoding="utf-8") as f:
@@ -45,6 +55,43 @@ try:
 except Exception:
     pass
 
+
+
+
+def safe_load_version():
+    try:
+        if not os.path.exists(VERSION_PATH) or os.path.getsize(VERSION_PATH) == 0:
+            return {"versionName": "", "versionCode": 0, "updateURL": ""}
+        with open(VERSION_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"versionName": "", "versionCode": 0, "updateURL": ""}
+
+def safe_save_version(data):
+    try:
+        with open(VERSION_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        print(f"版本信息写入失败: {e}")
+
+def safe_load_rooms():
+    with file_lock:
+        try:
+            if not os.path.exists(ROOMS_LIST_PATH) or os.path.getsize(ROOMS_LIST_PATH) == 0:
+                return {}
+            with open(ROOMS_LIST_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"读取异常: {e}")
+            return {}
+
+def safe_save_rooms(data):
+    with file_lock:
+        try:
+            with open(ROOMS_LIST_PATH, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            print(f"写入异常: {e}")
 
 
 def update_user_activity(user_name, room_name):
@@ -58,8 +105,7 @@ def update_user_activity(user_name, room_name):
 def clean_expired_rooms():
     try:
         current_time = int(time.time())
-        with open(ROOMS_LIST_PATH, "r", encoding="utf-8") as f:
-            rooms_data = json.load(f)
+        rooms_data = safe_load_rooms() 
 
         rooms_to_delete = []
         for name, info in rooms_data.items():
@@ -70,68 +116,54 @@ def clean_expired_rooms():
             for name in rooms_to_delete:
                 shutil.rmtree(f"./data/rooms/{name}", ignore_errors=True)
                 del rooms_data[name]
-            with open(ROOMS_LIST_PATH, "w", encoding="utf-8") as f:
-                f.write(json.dumps(rooms_data))
+            safe_save_rooms(rooms_data) 
             print(f"已清理到期房间: {rooms_to_delete}")
     except Exception as e:
         print(f"清理房间任务异常: {e}")
 
-
 def clean_inactive_users():
     global user_activity_map
     current_time = int(time.time())
-    timeout = 45  # 45秒超时
+    timeout = 45
 
     try:
-        with open(ROOMS_LIST_PATH, "r", encoding="utf-8") as f:
-            rooms_data = json.load(f)
-
+        rooms_data = safe_load_rooms()
         changed = False
         users_to_remove = []
 
-        # 遍历内存中的活跃表
         for user, info in list(user_activity_map.items()):
             if current_time - info["last_time"] > timeout:
                 room_name = info["room"]
                 if room_name in rooms_data:
                     if user in rooms_data[room_name]["users_list"]:
                         rooms_data[room_name]["users_list"].remove(user)
-                        # 重新计算人数
                         rooms_data[room_name]["present_number"] = len(rooms_data[room_name]["users_list"])
-                        # 若人数空出，恢复房间状态为可加入
                         if rooms_data[room_name]["present_number"] < rooms_data[room_name]["max_number"]:
                             rooms_data[room_name]["status"] = True
                         changed = True
                 users_to_remove.append(user)
 
-        # 从内存表中抹除
         for user in users_to_remove:
             del user_activity_map[user]
 
         if changed:
-            with open(ROOMS_LIST_PATH, "w", encoding="utf-8") as f:
-                f.write(json.dumps(rooms_data))
+            safe_save_rooms(rooms_data) # 修改点
             print(f"自动清理掉线用户: {users_to_remove}")
-
     except Exception as e:
         print(f"清理用户逻辑异常: {e}")
 
 
+
 @app.route('/api/connect', methods=['POST'])
 def verify_connect():
-    if tools.is_file_actually_empty(ROOMS_LIST_PATH):
+    j = safe_load_rooms()
+    filtered_keys = [k for k in j.keys() if not k.startswith("__")]
+    if not filtered_keys:
         return jsonify({"code": 900, "content": "null"})
-
-    try:
-        j = json.load(open(ROOMS_LIST_PATH, "r"))
-        return jsonify({
-            "room_name_list": list(j.keys()),
-            "room_status_list": [j[i].get("status", True) for i in j]
-        })
-    except Exception as e:
-        print(f"Error in verify_connect: {e}")
-        return jsonify({"code": 900, "content": "null"})
-
+    return jsonify({
+        "room_name_list": filtered_keys,
+        "room_status_list": [j[k].get("status", True) for k in filtered_keys]
+    })
 
 @app.route('/api/create_room', methods=['POST'])
 def create_room():
@@ -141,7 +173,7 @@ def create_room():
     password = request_json.get("password")
     cancel_time = request_json.get("cancel_time") * 60 + int(time.time())
 
-    j = json.load(open(ROOMS_LIST_PATH, "r"))
+    j = safe_load_rooms()
     j[room_name] = {
         "status": True,
         "max_number": max_number,
@@ -152,13 +184,17 @@ def create_room():
         "is_music_pause": True,
         "current_music": "",
         "password": password,
-        "users_list": []
+        "users_list": [],
+        "is_playing_example": False,
+        "last_update_time": 0,  
+        "last_operator": ""    
     }
-    with open(ROOMS_LIST_PATH, "w") as f:
-        f.write(json.dumps(j))
-
+    safe_save_rooms(j)
     os.makedirs(f"./data/rooms/{room_name}/music", exist_ok=True)
     return "行"
+
+
+
 
 
 @app.route('/api/get_music_status', methods=['POST'])
@@ -167,11 +203,10 @@ def get_music_status():
     room_name = request_data.get("room_name")
     user_name = request_data.get("user_name")
 
-    # 核心：高频更新用户活跃度
     if user_name and room_name:
         update_user_activity(user_name, room_name)
 
-    j = json.load(open(ROOMS_LIST_PATH, "r"))
+    j = safe_load_rooms()
     if room_name not in j:
         return "房间不存在", 404
 
@@ -179,25 +214,81 @@ def get_music_status():
     return jsonify({
         "current_music": r['current_music'],
         "is_music_pause": r['is_music_pause'],
-        "current_music_time": r['current_music_time']
+        "current_music_time": r['current_music_time'],
+        "is_playing_example": r.get('is_playing_example', False)
     })
-
 
 @app.route('/api/update_music_status', methods=['POST'])
 def update_music_status():
     request_data = request.get_json()
     room_name = request_data.get("room_name")
-    user_name = request_data.get("user_name")  # 建议前端也带上这个
+    user_name = request_data.get("user_name")
+    is_pause = request_data.get("is_music_pause")
+    current_time = request_data.get("current_music_time")
+    current_music = request_data.get("current_music")
+    is_example = request_data.get("is_example", False)
+    client_update_time = request_data.get("update_time", 0)  # 新增
 
     update_user_activity(user_name, room_name)
 
-    j = json.load(open(ROOMS_LIST_PATH, "r"))
+    j = safe_load_rooms()
     if room_name in j:
-        j[room_name]["current_music_time"] = request_data.get("current_music_time")
-        j[room_name]["is_music_pause"] = request_data.get("is_music_pause")
-        j[room_name]["current_music"] = request_data.get("current_music")
-        with open(ROOMS_LIST_PATH, "w") as f:
-            f.write(json.dumps(j))
+        server_last_update = j[room_name].get("last_update_time", 0)
+        
+        if client_update_time < server_last_update:
+            return "OK"
+
+        j[room_name]["current_music_time"] = current_time
+        j[room_name]["is_music_pause"] = is_pause
+        j[room_name]["current_music"] = current_music
+        j[room_name]["is_playing_example"] = is_example
+        j[room_name]["last_update_time"] = client_update_time  # 新增
+        safe_save_rooms(j)
+    return "OK"
+
+
+@app.route('/api/search_example_songs')
+def search_example_songs():
+    keyword = request.args.get('q', '').strip().lower()
+    page = request.args.get('page', 1, type=int)
+    page_size = request.args.get('page_size', 20, type=int)
+    
+    all_songs = [f for f in os.listdir(EXAMPLE_MUSICS) if f.lower().endswith('.mp3')]
+    
+    if keyword:
+        filtered = [f for f in all_songs if keyword in os.path.splitext(f)[0].lower()]
+    else:
+        filtered = all_songs
+    
+    total = len(filtered)
+    start = (page - 1) * page_size
+    end = start + page_size
+    songs = [os.path.splitext(f)[0] for f in filtered[start:end]]
+    
+    return jsonify({
+        'total': total,
+        'page': page,
+        'page_size': page_size,
+        'songs': songs
+    })
+
+
+@app.route('/api/set_example_mode', methods=['POST'])
+def set_example_mode():
+    request_data = request.get_json()
+    room_name = request_data.get("room_name")
+    user_name = request_data.get("user_name")
+    example_mode = request_data.get("example_mode", False)
+
+    j = safe_load_rooms()
+    if room_name not in j:
+        return "房间不存在", 404
+
+    # 更新模式
+    j[room_name]['is_playing_example'] = example_mode
+
+    safe_save_rooms(j)
+    update_user_activity(user_name, room_name)
     return "OK"
 
 
@@ -208,32 +299,24 @@ def enter_room():
     password = request_data.get("password")
     user_name = request_data.get("user_name")
 
-    j = json.load(open(ROOMS_LIST_PATH, "r"))
-
+    j = safe_load_rooms() 
     if room_name not in j:
         return "房间不存在", 404
-
-    # 判别禁止重复进入
     if user_name in j[room_name]['users_list']:
-        return "您已在房间中，请勿重复进入", 403
-
+        return "您已在房间中", 403
     if not j[room_name]['status']:
         return "房间已满", 401
-
     if j[room_name]['password'] != password:
         return "密码错误", 402
 
-    # 加入房间
     j[room_name]['users_list'].append(user_name)
     j[room_name]['present_number'] = len(j[room_name]['users_list'])
-
     update_user_activity(user_name, room_name)
 
     if j[room_name]['present_number'] >= j[room_name]['max_number']:
         j[room_name]['status'] = False
 
-    with open(ROOMS_LIST_PATH, "w") as f:
-        f.write(json.dumps(j))
+    safe_save_rooms(j)
     return "行"
 
 
@@ -257,19 +340,15 @@ def exit_room():
     room_name = request_json.get("room_name")
     user_name = request_json.get("user_name")
 
-    j = json.load(open(ROOMS_LIST_PATH, "r"))
+    j = safe_load_rooms() 
     if room_name in j and user_name in j[room_name]['users_list']:
         j[room_name]['users_list'].remove(user_name)
         j[room_name]['present_number'] = len(j[room_name]['users_list'])
         if j[room_name]['present_number'] < j[room_name]['max_number']:
             j[room_name]['status'] = True
-
-        # 移除活跃记录
         if user_name in user_activity_map:
             del user_activity_map[user_name]
-
-        with open(ROOMS_LIST_PATH, "w") as f:
-            f.write(json.dumps(j))
+        safe_save_rooms(j)
     return "行"
 
 
@@ -315,18 +394,15 @@ def upload():
 
 @app.route('/api/append_message', methods=['POST'])
 def append_message():
-    request_data = request.get_data().decode('utf-8')
-    request_json = json.loads(request_data)
+    request_json = request.get_json()
     room_name = request_json.get("room_name")
     message = request_json.get("message")
-    print(message)
-    j = json.load(open(ROOMS_LIST_PATH, "r"))
-    j[room_name]['message_list'].append(message)
-    f = open(ROOMS_LIST_PATH, "w")
-    f.write(json.dumps(j))
-    f.close()
+    
+    j = safe_load_rooms()
+    if room_name in j:
+        j[room_name]['message_list'].append(message)
+        safe_save_rooms(j)
     return "行"
-
 
 @app.route('/api/list_songs', methods=['POST'])
 def list_songs():
@@ -339,17 +415,60 @@ def list_songs():
 
     return jsonify(songs)
 
+@app.route('/api/list_example_songs')
+def list_example_songs():
+    page = request.args.get('page', 1, type=int)
+    page_size = request.args.get('page_size', 20, type=int)
+    all_songs = [f for f in os.listdir(EXAMPLE_MUSICS) if f.lower().endswith('.mp3')]
+    total = len(all_songs)
+    start = (page - 1) * page_size
+    end = start + page_size
+    songs = [os.path.splitext(f)[0] for f in all_songs[start:end]]
+    return jsonify({
+        'total': total,
+        'page': page,
+        'page_size': page_size,
+        'songs': songs
+    })
+
+@app.route('/api/cover/<room_name>/<filename>')
+def get_cover(room_name, filename):
+    if room_name == "example":
+        cover_path = os.path.join(EXAMPLE_MUSICS, f"{filename}.jpg")
+    else:
+        cover_path = os.path.join(f"./data/rooms/{room_name}/music", f"{filename}.jpg")
+    if not os.path.exists(cover_path):
+        cover_path = os.path.join(EXAMPLE_MUSICS, f"{filename}.jpg")
+    if os.path.exists(cover_path):
+        return send_from_directory(os.path.dirname(cover_path), os.path.basename(cover_path))
+    else:
+        return '', 404
+
+
+
 @app.route('/api/stream/<room_name>/<filename>')
 def stream(room_name, filename):
     if not filename.lower().endswith('.mp3'):
         filename = f"{filename}.mp3"
     return send_from_directory(f"./data/rooms/{room_name}/music", filename)
 
+@app.route('/api/stream_example/<filename>')
+def stream_example(filename):
+    if not filename.lower().endswith('.mp3'):
+        filename = f"{filename}.mp3"
+    return send_from_directory(EXAMPLE_MUSICS, filename)
+
+
+@app.route('/api/version', methods=['GET'])
+def get_version():
+    v = safe_load_version()
+    return jsonify(v)
+
 
 def init_scheduler():
     scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
     # 每分钟清理一次掉线用户
-    scheduler.add_job(clean_inactive_users, 'interval', seconds=60, id="clean_users_job")
+    scheduler.add_job(clean_inactive_users, 'interval', seconds=30, id="clean_users_job")
     # 每7分钟清理一次到期房间
     scheduler.add_job(clean_expired_rooms, 'interval', seconds=420, id="clean_rooms_job")
     scheduler.start()
@@ -358,35 +477,123 @@ def init_scheduler():
 
 def console_listener():
     while True:
-        cmd = input().strip().lower()
+        try:
+            cmd_line = input().strip()
+        except (EOFError, KeyboardInterrupt):
+            # 当输入流关闭或用户按 Ctrl+C 时，安静退出线程
+            break
+        except Exception as e:
+            print(f"输入读取异常: {e}")
+            continue
 
-        if cmd == "ls":
-            with open(ROOMS_LIST_PATH, "r", encoding="utf-8") as f:
-                rooms_data = json.load(f)
-            if not rooms_data:
-                print("当前无房间")
+        if not cmd_line:
+            continue
+
+        # 使用 shlex 分割，支持引号包裹的参数
+        try:
+            parts = shlex.split(cmd_line)
+        except Exception as e:
+            print(f"命令解析错误: {e}")
+            continue
+
+        command = parts[0].lower()
+
+        try:
+            if command == "ls":
+                rooms_data = safe_load_rooms()
+                if not rooms_data:
+                    print("当前无房间")
+                else:
+                    for name, info in rooms_data.items():
+                        print(f"房间: {name} | 人数: {info['present_number']} | 状态: {info['status']}")
+
+            elif command == "rm":
+                if len(parts) < 2:
+                    print("用法: rm <房间名>")
+                    continue
+                room_name = parts[1]
+                rooms_data = safe_load_rooms()
+                if room_name in rooms_data:
+                    shutil.rmtree(f"./data/rooms/{room_name}", ignore_errors=True)
+                    del rooms_data[room_name]
+                    safe_save_rooms(rooms_data)
+                    print(f"已强制删除: {room_name}")
+                else:
+                    print("房间不存在")
+
+            elif command == "set":
+                if len(parts) < 3:
+                    print("用法: set versionName '名称' | set versionCode '号码' | set updateURL '链接'")
+                    continue
+                field = parts[1].lower()
+                # 将剩余部分重新组合成值（支持空格）
+                value = ' '.join(parts[2:]).strip().strip("'\"")
+                v = safe_load_version()
+                if field == "versionname":
+                    v["versionName"] = value
+                    safe_save_version(v)
+                    print(f"已设置 versionName = {value}")
+                elif field == "versioncode":
+                    try:
+                        v["versionCode"] = int(value)
+                        safe_save_version(v)
+                        print(f"已设置 versionCode = {value}")
+                    except ValueError:
+                        print("versionCode 必须是整数")
+                elif field == "updateurl":
+                    v["updateURL"] = value
+                    safe_save_version(v)
+                    print(f"已设置 updateURL = {value}")
+                else:
+                    print(f"未知字段: {field}，可选: versionName / versionCode / updateURL")
+
             else:
-                for name, info in rooms_data.items():
-                    print(f"房间: {name} | 人数: {info['present_number']} | 状态: {info['status']}")
+                print(f"未知命令: {command}，支持的命令: ls, rm <房间名>, set <字段> <值>")
 
-        elif cmd.startswith("rm "):
-            room_name = cmd.split(" ", 1)[1]
-            with open(ROOMS_LIST_PATH, "r", encoding="utf-8") as f:
-                rooms_data = json.load(f)
-            if room_name in rooms_data:
-                shutil.rmtree(f"./data/rooms/{room_name}", ignore_errors=True)
-                del rooms_data[room_name]
-                with open(ROOMS_LIST_PATH, "w", encoding="utf-8") as f:
-                    f.write(json.dumps(rooms_data))
-                print(f"已强制删除: {room_name}")
-            else:
-                print("房间不存在")
+        except Exception as e:
+            print(f"执行命令时出错: {e}")
 
-        elif cmd == "exit":
-            print("正在关闭服务器...")
-            os._exit(0)
+def initialize_example_musics():
+    if not os.path.exists(EXAMPLE_MUSICS):
+        os.makedirs(EXAMPLE_MUSICS, exist_ok=True)
+        return
+
+    print("正在初始化 example_musics 目录...")
+    files = os.listdir(EXAMPLE_MUSICS)
+    
+    for filename in files:
+        full_path = os.path.join(EXAMPLE_MUSICS, filename)
+        
+        # 跳过文件夹
+        if os.path.isdir(full_path):
+            continue
+            
+        name, ext = os.path.splitext(filename)
+        ext = ext.lower()
+        # 如果已经是 .mp3，检查是否需要规范化（可选）或跳过
+        if ext == '.mp3':
+            continue
+
+        # 如果是常见的音频/视频格式，尝试转码
+        support_exts = ['.wav', '.m4a', '.flac', '.aac', '.ogg', '.mp4', '.mkv']
+        if ext in support_exts:
+            print(f"发现非标准格式: {filename}，准备转码...")
+            try:
+                final_title = tools.get_music_title(full_path, filename)
+                threading.Thread(
+                    target=tools.transcode_to_mp3,
+                    args=(full_path, EXAMPLE_MUSICS, final_title)
+                ).start()
+                print(f"成功标准化: {name}.mp3")
+            except Exception as e:
+                print(f"标准化文件 {filename} 失败: {e}")
+        else:
+            if filename != ".gitkeep": # 保护隐藏文件
+                print(f"跳过未知格式文件: {filename}")
+
 
 if __name__ == '__main__':
     init_scheduler()
+    initialize_example_musics()
     threading.Thread(target=console_listener, daemon=True).start()
     app.run(host='0.0.0.0', port=6132, debug=False)

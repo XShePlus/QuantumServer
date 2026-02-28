@@ -1,27 +1,29 @@
 from pathlib import Path
-import os
 import subprocess
+import json
+import os
 from pydub import AudioSegment
 from mutagen.flac import FLAC
 from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, APIC, error
+
 class Tools:
     def check_and_create_file(self, file_path):
         file = Path(file_path)
 
-        # 创建目录逻辑保持不变
+        # 创建目录
         if not file.parent.exists():
             file.parent.mkdir(parents=True, exist_ok=True)
             print(f"目录不存在，已创建：{file.parent}")
 
-        # 修改文件创建逻辑
-        if not file.is_file() or file.stat().st_size == 0:  # 如果文件不存在，或者文件大小为0
+        # 如果文件不存在或为空，写入初始 JSON
+        if not file.is_file() or file.stat().st_size == 0:
             with open(file_path, "w", encoding='utf-8') as f:
-                f.write("{}")  # 写入初始的 JSON 结构
+                f.write("{}")
         else:
             print(f"文件已存在且不为空：{file_path}")
 
-    def is_file_actually_empty(self,file_path):
+    def is_file_actually_empty(self, file_path):
         file = Path(file_path)
 
         if not file.exists():
@@ -66,33 +68,27 @@ class Tools:
 
     @staticmethod
     def transcode_to_mp3(source_path, target_dir, final_title):
+        source_path = Path(source_path)
+        target_path = Path(target_dir) / f"{final_title}.mp3"
+
+        cmd = [
+            'ffmpeg', '-y', '-i', str(source_path),
+            '-map', '0:a?',           # 映射音频流（如果存在）
+            '-map', '0:v?',           # 映射视频流（如果存在，通常是封面）
+            '-c:a', 'libmp3lame', '-b:a', '192k',
+            '-c:v', 'copy',            # 视频流直接复制
+            '-disposition:v', 'attached_pic',  # 标记为附属封面
+            '-id3v2_version', '3',
+            '-map_metadata', '0',       # 保留原始元数据
+            str(target_path)
+        ]
+
         try:
-            target_path = os.path.join(target_dir, f"{final_title}.mp3")
-
-            # 探测是否有封面流
-            probe_cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name',
-                         '-of', 'csv=p=0', source_path]
-            has_cover = subprocess.check_output(probe_cmd).decode('utf-8').strip()
-
-            if has_cover:
-                cmd = [
-                    'ffmpeg', '-y', '-i', source_path,
-                    '-map', '0:a:0', '-map', '0:v:0?',
-                    '-c:a', 'libmp3lame', '-ab', '192k',
-                    '-c:v', 'copy', '-id3v2_version', '3',
-                    target_path
-                ]
-            else:
-                cmd = [
-                    'ffmpeg', '-y', '-i', source_path,
-                    '-vn', '-acodec', 'libmp3lame', '-ab', '192k',
-                    target_path
-                ]
-
-            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            print(f"最终生成文件: {target_path}")
+            subprocess.run(cmd, check=True, capture_output=True)
+            print(f"转码成功: {target_path} (封面已保留)")
+            if source_path.exists():
+                source_path.unlink()
+        except subprocess.CalledProcessError as e:
+            print(f"FFmpeg 转码失败: {e.stderr.decode()}")
         except Exception as e:
-            print(f"转码或重命名过程出错: {e}")
-        finally:
-            if os.path.exists(source_path):
-                os.remove(source_path)
+            print(f"发生错误: {e}")
