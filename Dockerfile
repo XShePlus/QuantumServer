@@ -1,32 +1,51 @@
-# 1. 使用 Python 3.14 轻量版镜像
-FROM python:3.14-slim
+# 1. 使用 Python 3.12 轻量版镜像
+FROM python:3.12-slim-bookworm
 
 # 2. 设置工作目录
 WORKDIR /app
 
-# 3. 安装系统级依赖
-# pydub 必须依赖 ffmpeg 来处理 flac/mp3 转换
-# 这里的 apt-get update 和 install 写在一起减少层数
-RUN apt-get update && \
-    apt-get install -y ffmpeg && \
+# 3. 代理构建参数（可选）
+ARG PROXY
+
+# 4. 安装系统级依赖（ffmpeg + curl 用于健康检查）
+RUN if [ -n "$PROXY" ]; then \
+        echo "使用代理: $PROXY"; \
+        echo "Acquire::http::Proxy \"$PROXY\";" > /etc/apt/apt.conf.d/99proxy; \
+        echo "Acquire::https::Proxy \"$PROXY\";" >> /etc/apt/apt.conf.d/99proxy; \
+        apt-get update && apt-get install -y ffmpeg curl; \
+        rm -f /etc/apt/apt.conf.d/99proxy; \
+    else \
+        echo "未使用代理"; \
+        apt-get update && apt-get install -y ffmpeg curl; \
+    fi && \
     rm -rf /var/lib/apt/lists/*
 
-# 4. 复制依赖文件并安装
+# 【关键】5. 先复制 requirements.txt（利用 Docker 缓存）
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
-# 5. 复制项目代码
-COPY main.py .
-COPY Tools.py .
+# 6. 安装 Python 依赖（支持代理）
+RUN if [ -n "$PROXY" ]; then \
+        http_proxy=$PROXY https_proxy=$PROXY pip install --no-cache-dir -r requirements.txt; \
+    else \
+        pip install --no-cache-dir -r requirements.txt; \
+    fi
 
-# 6. 预创建数据目录 (重要：防止权限问题)
-RUN mkdir -p /app/data
+# 7. 复制项目代码
+COPY main.py Tools.py ./
 
-# 7. 暴露端口
+# 8. 创建数据目录并设置权限
+RUN mkdir -p /app/data /app/example_musics && \
+    groupadd -r appuser && useradd -r -g appuser appuser && \
+    chown -R appuser:appuser /app
+
+# 9. 切换用户
+USER appuser
+
+# 10. 暴露端口
 EXPOSE 6132
 
-# 8. 环境变量：防止 Python 缓冲输出，方便看日志
+# 11. 环境变量：防止 Python 缓冲输出
 ENV PYTHONUNBUFFERED=1
 
-# 9. 启动命令
+# 12. 启动命令
 CMD ["python", "main.py"]

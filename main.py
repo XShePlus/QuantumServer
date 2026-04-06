@@ -7,7 +7,7 @@ except ImportError:
 
 from flask import Flask, request, jsonify, send_from_directory, Response, stream_with_context
 from flask_cors import CORS
-import threading, os, time, json, shutil, sys, shlex, re, random, queue
+import threading, os, time, json, shutil, sys, shlex, re, random, queue, hashlib, secrets
 from Tools import Tools
 from apscheduler.schedulers.background import BackgroundScheduler
 from threading import Lock
@@ -21,25 +21,161 @@ room_template = {
     "current_music": "",
     "is_music_pause": True,
     "current_music_time": 0,
-    "password": "",
+    "password": {"hash": "", "salt": "", "algorithm": "none"},  # 默认无密码哈希
     "users_list": [],
     "is_playing_example": False,
     "last_update_time": 0,
     "last_operator": ""
 }
 
+# 安全验证函数
+def validate_path_component(component: str) -> bool:
+    """验证路径组件是否安全，防止路径遍历攻击"""
+    if not component or not isinstance(component, str):
+        return False
+    # 禁止路径遍历字符
+    if '..' in component or '/' in component or '\\' in component:
+        return False
+    # 仅允许字母、数字、中文、下划线、连字符、点号（用于文件扩展名）
+    # Unicode范围：\u4e00-\u9fff 是基本中文汉字
+    # 使用正确的正则表达式：\w 包含字母、数字、下划线
+    # 添加中文范围，连字符放在字符类末尾避免转义问题
+    return bool(re.match(r'^[\w.\- \u4e00-\u9fff]+$', component))
+
+def validate_room_name(name: str) -> bool:
+    """验证房间名格式"""
+    if not name or not isinstance(name, str):
+        return False
+    if not 1 <= len(name) <= 32:
+        return False
+    # 房间名允许中文、英文、数字、下划线、连字符
+    return bool(re.match(r'^[\w\-\u4e00-\u9fff]+$', name))
+
+def validate_user_name(name: str) -> bool:
+    """验证用户名格式"""
+    if not name or not isinstance(name, str):
+        return False
+    if not 1 <= len(name) <= 20:
+        return False
+    # 用户名允许中文、英文、数字、下划线、连字符
+    return bool(re.match(r'^[\w\-\u4e00-\u9fff]+$', name))
+
+def sanitize_filename(filename: str) -> str:
+    """净化文件名，移除危险字符"""
+    if not filename or not isinstance(filename, str):
+        return "unnamed"
+    # 移除路径分隔符
+    filename = filename.replace('/', '').replace('\\', '').replace('..', '')
+    # 限制长度
+    if len(filename) > 255:
+        filename = filename[:255]
+    return filename
+
+# 密码安全函数
+def hash_password(password: str, salt: str = None) -> dict:
+    """
+    使用PBKDF2算法对密码进行哈希加盐存储
+
+    参数:
+        password: 明文密码
+        salt: 盐值（如果为None则生成随机盐）
+
+    返回:
+        包含哈希值、盐值和算法标识的字典
+    """
+    if not password:
+        return {"hash": "", "salt": "", "algorithm": "none"}
+
+    if salt is None:
+        salt = secrets.token_hex(16)  # 128位随机盐
+
+    # 使用PBKDF2-HMAC-SHA256，迭代次数100000
+    hash_obj = hashlib.pbkdf2_hmac(
+        'sha256',
+        password.encode('utf-8'),
+        salt.encode('utf-8'),
+        100000  # 迭代次数，可根据性能调整
+    )
+
+    return {
+        'hash': hash_obj.hex(),
+        'salt': salt,
+        'algorithm': 'pbkdf2_sha256'
+    }
+
+def verify_password(password: str, stored_password) -> bool:
+    """
+    验证密码是否匹配存储的密码信息
+
+    参数:
+        password: 待验证的密码
+        stored_password: 存储的密码信息，可以是：
+                       - 字符串（明文密码，向后兼容）
+                       - 字典（哈希密码，包含hash、salt、algorithm）
+
+    返回:
+        bool: 密码是否匹配
+    """
+    if not password:
+        password = ""
+
+    # 处理None或空值
+    if not stored_password:
+        # 空密码存储，只有密码为空时才匹配
+        return password == ""
+
+    # 如果是字符串，直接比较（明文向后兼容）
+    if isinstance(stored_password, str):
+        # 明文比较（常量时间）
+        return secrets.compare_digest(password, stored_password)
+
+    # 如果是字典，检查哈希密码
+    if not isinstance(stored_password, dict):
+        return False
+
+    algorithm = stored_password.get('algorithm', '')
+    if algorithm == 'none':
+        # 无密码存储
+        return password == ""
+
+    if algorithm != 'pbkdf2_sha256':
+        # 不支持的算法
+        return False
+
+    salt = stored_password.get('salt')
+    expected_hash = stored_password.get('hash')
+
+    if not salt or not expected_hash:
+        return False
+
+    # 计算密码哈希
+    hash_obj = hashlib.pbkdf2_hmac(
+        'sha256',
+        password.encode('utf-8'),
+        salt.encode('utf-8'),
+        100000
+    )
+
+    # 常量时间比较，防止时序攻击
+    return secrets.compare_digest(hash_obj.hex(), expected_hash)
+
 app = Flask(__name__)
 CORS(app, resources=r"/*")
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
+
+# 环境变量配置
+DATA_PATH = os.environ.get('DATA_PATH', './data')
+EXAMPLE_MUSICS_PATH = os.environ.get('EXAMPLE_MUSICS_PATH', './example_musics')
+TEMP_PATH = os.environ.get('TEMP_PATH', os.path.join(DATA_PATH, 'temp'))
 
 file_lock = Lock()
 _rooms_cache: dict | None = None
 version_lock = Lock()
 tools = Tools()
-TEMP_DIR = './data/temp'
-ROOMS_LIST_PATH = "./data/rooms_list.json"
-EXAMPLE_MUSICS = "./example_musics"
-VERSION_PATH = "./data/version.json"
+TEMP_DIR = TEMP_PATH
+ROOMS_LIST_PATH = os.path.join(DATA_PATH, "rooms_list.json")
+EXAMPLE_MUSICS = EXAMPLE_MUSICS_PATH
+VERSION_PATH = os.path.join(DATA_PATH, "version.json")
 
 tools.check_and_create_file(VERSION_PATH)
 tools.check_and_create_file(ROOMS_LIST_PATH)
@@ -53,7 +189,7 @@ try:
     with open(ROOMS_LIST_PATH, "r", encoding="utf-8") as f:
         existing_rooms = json.load(f)
         for room_name in existing_rooms.keys():
-            os.makedirs(f"./data/rooms/{room_name}/music", exist_ok=True)
+            os.makedirs(os.path.join(DATA_PATH, "rooms", room_name, "music"), exist_ok=True)
 except Exception:
     pass
 
@@ -175,7 +311,7 @@ def clean_expired_rooms():
                 rooms_to_delete.append(name)
         if rooms_to_delete:
             for name in rooms_to_delete:
-                shutil.rmtree(f"./data/rooms/{name}", ignore_errors=True)
+                shutil.rmtree(os.path.join(DATA_PATH, "rooms", name), ignore_errors=True)
                 del rooms_data[name]
             safe_save_rooms(rooms_data)
             print(f"已清理到期房间: {rooms_to_delete}")
@@ -297,11 +433,34 @@ def create_room():
     room_name = (request_json.get("room_name") or "").strip()
     if not is_valid_room_name(room_name):
         return "非法房间名", 400
+
+    # 验证max_number参数
     max_number = request_json.get("max_number")
-    password = request_json.get("password")
-    cancel_time = request_json.get("cancel_time") * 60 + int(time.time())
+    try:
+        max_number = int(max_number)
+        if max_number < 1 or max_number > 100:  # 合理范围
+            return "人数限制必须在1-100之间", 400
+    except (ValueError, TypeError):
+        return "无效的人数限制", 400
+
+    password = request_json.get("password") or ""
+
+    # 验证cancel_time参数
+    cancel_time_minutes = request_json.get("cancel_time")
+    try:
+        cancel_time_minutes = int(cancel_time_minutes)
+        if cancel_time_minutes < 1 or cancel_time_minutes > 1440:  # 1分钟到24小时
+            return "房间有效期必须在1-1440分钟之间", 400
+    except (ValueError, TypeError):
+        return "无效的房间有效期", 400
+
+    cancel_time = cancel_time_minutes * 60 + int(time.time())
 
     j = safe_load_rooms()
+
+    # 哈希密码
+    password_hash = hash_password(password)
+
     j[room_name] = {
         "status": True,
         "max_number": max_number,
@@ -311,14 +470,14 @@ def create_room():
         "current_music_time": 0,
         "is_music_pause": True,
         "current_music": "",
-        "password": password,
+        "password": password_hash,  # 存储哈希字典而不是明文
         "users_list": [],
         "is_playing_example": False,
         "last_update_time": 0,
         "last_operator": ""
     }
     safe_save_rooms(j)
-    os.makedirs(f"./data/rooms/{room_name}/music", exist_ok=True)
+    os.makedirs(os.path.join(DATA_PATH, "rooms", room_name, "music"), exist_ok=True)
     return "行"
 
 
@@ -433,32 +592,52 @@ def set_example_mode():
 def enter_room():
     request_data = request.get_json()
     room_name = request_data.get("room_name")
-    password = request_data.get("password")
+    password = request_data.get("password") or ""
     user_name = request_data.get("user_name")
+
+    # 验证输入
+    if not room_name or not isinstance(room_name, str):
+        return "房间名无效", 400
+
+    if not validate_room_name(room_name):
+        return "房间名格式不正确", 400
+
+    if not user_name or not isinstance(user_name, str):
+        return "用户名无效", 400
+
+    if not validate_user_name(user_name):
+        return "用户名格式不正确（1-20字符，允许中文、英文、数字、下划线、连字符）", 400
 
     j = safe_load_rooms()
     if room_name not in j:
         return "房间不存在", 404
-    if user_name in j[room_name]['users_list']:
+
+    room_data = j[room_name]
+
+    if user_name in room_data['users_list']:
         return "您已在房间中", 403
-    if not j[room_name]['status']:
+
+    if not room_data['status']:
         return "房间已满", 401
-    if j[room_name]['password'] != password:
+
+    # 使用verify_password验证密码（支持明文和哈希）
+    stored_password = room_data.get('password', "")
+    if not verify_password(password, stored_password):
         return "密码错误", 402
 
-    j[room_name]['users_list'].append(user_name)
-    j[room_name]['present_number'] = len(j[room_name]['users_list'])
+    room_data['users_list'].append(user_name)
+    room_data['present_number'] = len(room_data['users_list'])
     update_user_activity(user_name, room_name)
 
-    if j[room_name]['present_number'] >= j[room_name]['max_number']:
-        j[room_name]['status'] = False
+    if room_data['present_number'] >= room_data['max_number']:
+        room_data['status'] = False
 
     safe_save_rooms(j)
 
     # 广播成员变化
     push_to_room(room_name, "room_update", {
-        "present_number": j[room_name]["present_number"],
-        "users_list": j[room_name]["users_list"]
+        "present_number": room_data["present_number"],
+        "users_list": room_data["users_list"]
     })
     return "行"
 
@@ -522,7 +701,7 @@ def append_message():
 @app.route('/api/list_songs', methods=['POST'])
 def list_songs():
     room_name = request.get_json().get("room_name")
-    dir_path = f"./data/rooms/{room_name}/music"
+    dir_path = os.path.join(DATA_PATH, "rooms", room_name, "music")
     if not os.path.exists(dir_path):
         return jsonify([])
     songs = [os.path.splitext(f)[0] for f in os.listdir(dir_path) if f.lower().endswith('.mp3')]
@@ -570,12 +749,24 @@ def list_example_songs():
 
 @app.route('/api/cover/<room_name>/<filename>')
 def get_cover(room_name, filename):
+    # 验证输入参数
+    if not validate_path_component(room_name) or not validate_path_component(filename):
+        return '', 400
+
+    # 净化文件名
+    safe_filename = sanitize_filename(filename)
+
     if room_name == "example":
-        cover_path = os.path.join(EXAMPLE_MUSICS, f"{filename}.jpg")
+        cover_path = os.path.join(EXAMPLE_MUSICS, f"{safe_filename}.jpg")
     else:
-        cover_path = os.path.join(f"./data/rooms/{room_name}/music", f"{filename}.jpg")
+        # 额外验证房间名格式
+        if not validate_room_name(room_name):
+            return '', 400
+        cover_path = os.path.join(DATA_PATH, "rooms", room_name, "music", f"{safe_filename}.jpg")
+
     if not os.path.exists(cover_path):
-        cover_path = os.path.join(EXAMPLE_MUSICS, f"{filename}.jpg")
+        cover_path = os.path.join(EXAMPLE_MUSICS, f"{safe_filename}.jpg")
+
     if os.path.exists(cover_path):
         return send_from_directory(os.path.dirname(cover_path), os.path.basename(cover_path))
     else:
@@ -583,15 +774,37 @@ def get_cover(room_name, filename):
 
 @app.route('/api/stream/<room_name>/<filename>')
 def stream(room_name, filename):
-    if not filename.lower().endswith('.mp3'):
-        filename = f"{filename}.mp3"
-    return send_from_directory(f"./data/rooms/{room_name}/music", filename)
+    # 验证输入参数
+    if not validate_room_name(room_name) or not validate_path_component(filename):
+        return '', 400
+
+    # 净化文件名
+    safe_filename = sanitize_filename(filename)
+    if not safe_filename.lower().endswith('.mp3'):
+        safe_filename = f"{safe_filename}.mp3"
+
+    # 验证最终文件名
+    if not validate_path_component(safe_filename):
+        return '', 400
+
+    return send_from_directory(os.path.join(DATA_PATH, "rooms", room_name, "music"), safe_filename)
 
 @app.route('/api/stream_example/<filename>')
 def stream_example(filename):
-    if not filename.lower().endswith('.mp3'):
-        filename = f"{filename}.mp3"
-    return send_from_directory(EXAMPLE_MUSICS, filename)
+    # 验证输入参数
+    if not validate_path_component(filename):
+        return '', 400
+
+    # 净化文件名
+    safe_filename = sanitize_filename(filename)
+    if not safe_filename.lower().endswith('.mp3'):
+        safe_filename = f"{safe_filename}.mp3"
+
+    # 验证最终文件名
+    if not validate_path_component(safe_filename):
+        return '', 400
+
+    return send_from_directory(EXAMPLE_MUSICS, safe_filename)
 
 @app.route('/api/version', methods=['GET'])
 def get_version():
@@ -615,7 +828,7 @@ def upload():
     file = request.files.get('file')
     if not file:
         return "No file", 400
-    room_music_dir = f"./data/rooms/{room_name}/music"
+    room_music_dir = os.path.join(DATA_PATH, "rooms", room_name, "music")
     os.makedirs(room_music_dir, exist_ok=True)
     os.makedirs(TEMP_DIR, exist_ok=True)
     temp_filename = f"temp_{int(time.time())}_{file.filename}"
@@ -681,7 +894,7 @@ def console_listener():
                 room_name = parts[1]
                 rooms_data = safe_load_rooms()
                 if room_name in rooms_data:
-                    shutil.rmtree(f"./data/rooms/{room_name}", ignore_errors=True)
+                    shutil.rmtree(os.path.join(DATA_PATH, "rooms", room_name), ignore_errors=True)
                     del rooms_data[room_name]
                     safe_save_rooms(rooms_data)
                     print(f"已强制删除: {room_name}")

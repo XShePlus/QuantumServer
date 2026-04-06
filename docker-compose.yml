@@ -1,0 +1,54 @@
+services:
+  quantum-server:
+    # 构建镜像并打 tag，用于发布到 Docker Hub
+    # 构建: docker compose build
+    # 发布: docker compose push
+    build:
+      context: .
+      args:
+        # 内网环境可通过环境变量传入代理，无需代理时留空即可：PROXY= docker compose build
+        PROXY: ${PROXY:-}
+    image: xsheplus/quantum-server:latest
+    container_name: quantum-server
+    restart: unless-stopped
+    ports:
+      - "6132:6132"
+    # 数据持久化卷配置
+    volumes:
+      # 主数据目录：存储房间数据、配置文件等
+      - ./data:/app/data
+      # 示例音乐目录：用户自定义音乐模板位置
+      - ./example_musics:/app/example_musics
+      # 可选：自定义临时文件目录（如需单独挂载）
+      # - ./temp:/app/data/temp
+    # 环境变量配置
+    environment:
+      # 数据目录路径（与卷挂载路径一致）
+      - DATA_PATH=/app/data
+      # 示例音乐目录路径（与卷挂载路径一致）
+      - EXAMPLE_MUSICS_PATH=/app/example_musics
+      # 临时文件目录路径（默认在DATA_PATH内）
+      - TEMP_PATH=/app/data/temp
+      # Python相关优化
+      - PYTHONUNBUFFERED=1
+      # 时区设置（可选）
+      - TZ=Asia/Shanghai
+    # 资源限制（deploy.resources 仅 Swarm 模式生效，普通 compose 使用以下字段）
+    mem_limit: 512m
+    mem_reservation: 256m
+    cpus: 1.0
+    # 健康检查（与 Dockerfile 保持一致）
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6132/api/version"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    # 安全配置：使用非root用户（UID形式，避免字符串解析失败）
+    user: "1000:1000"
+    # 日志配置
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
